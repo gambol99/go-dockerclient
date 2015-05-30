@@ -241,6 +241,24 @@ func TestCreateContainerInvalidBody(t *testing.T) {
 	}
 }
 
+func TestCreateContainerInvalidName(t *testing.T) {
+	server := DockerServer{}
+	server.buildMuxer()
+	recorder := httptest.NewRecorder()
+	body := `{"Hostname":"", "User":"", "Memory":0, "MemorySwap":0, "AttachStdin":false, "AttachStdout":true, "AttachStderr":true,
+"PortSpecs":null, "Tty":false, "OpenStdin":false, "StdinOnce":false, "Env":null, "Cmd":["date"],
+"Image":"base", "Volumes":{}, "VolumesFrom":""}`
+	request, _ := http.NewRequest("POST", "/containers/create?name=myapp/container1", strings.NewReader(body))
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Errorf("CreateContainer: wrong status. Want %d. Got %d.", http.StatusInternalServerError, recorder.Code)
+	}
+	expectedBody := "Invalid container name\n"
+	if got := recorder.Body.String(); got != expectedBody {
+		t.Errorf("CreateContainer: wrong body. Want %q. Got %q.", expectedBody, got)
+	}
+}
+
 func TestCreateContainerImageNotFound(t *testing.T) {
 	server := DockerServer{}
 	server.buildMuxer()
@@ -829,6 +847,23 @@ func TestRemoveContainerRunning(t *testing.T) {
 	}
 	if len(server.containers) < 1 {
 		t.Error("RemoveContainer: should not remove the container.")
+	}
+}
+
+func TestRemoveContainerRunningForce(t *testing.T) {
+	server := DockerServer{}
+	addContainers(&server, 1)
+	server.containers[0].State.Running = true
+	server.buildMuxer()
+	recorder := httptest.NewRecorder()
+	path := fmt.Sprintf("/containers/%s?%s", server.containers[0].ID, "force=1")
+	request, _ := http.NewRequest("DELETE", path, nil)
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Errorf("RemoveContainer: wrong status. Want %d. Got %d.", http.StatusNoContent, recorder.Code)
+	}
+	if len(server.containers) > 0 {
+		t.Error("RemoveContainer: did not remove the container.")
 	}
 }
 
