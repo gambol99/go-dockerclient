@@ -153,6 +153,18 @@ func NewTLSClient(endpoint string, cert, key, ca string) (*Client, error) {
 	return client, nil
 }
 
+// NewTLSClientFromBytes returns a Client instance ready for TLS communications with the givens
+// server endpoint, key and certificates (passed inline to the function as opposed to being
+// read from a local file). It will use the latest remote API version available in the server.
+func NewTLSClientFromBytes(endpoint string, certPEMBlock, keyPEMBlock, caPEMCert []byte) (*Client, error) {
+	client, err := NewVersionedTLSClientFromBytes(endpoint, certPEMBlock, keyPEMBlock, caPEMCert, "")
+	if err != nil {
+		return nil, err
+	}
+	client.SkipServerVersionCheck = true
+	return client, nil
+}
+
 // NewVersionedClient returns a Client instance ready for communication with
 // the given server endpoint, using a specific remote API version.
 func NewVersionedClient(endpoint string, apiVersionString string) (*Client, error) {
@@ -184,6 +196,25 @@ func NewVersionnedTLSClient(endpoint string, cert, key, ca, apiVersionString str
 // NewVersionedTLSClient returns a Client instance ready for TLS communications with the givens
 // server endpoint, key and certificates, using a specific remote API version.
 func NewVersionedTLSClient(endpoint string, cert, key, ca, apiVersionString string) (*Client, error) {
+	certPEMBlock, err := ioutil.ReadFile(cert)
+	if err != nil {
+		return nil, err
+	}
+	keyPEMBlock, err := ioutil.ReadFile(key)
+	if err != nil {
+		return nil, err
+	}
+	caPEMCert, err := ioutil.ReadFile(ca)
+	if err != nil {
+		return nil, err
+	}
+	return NewVersionedTLSClientFromBytes(endpoint, certPEMBlock, keyPEMBlock, caPEMCert, apiVersionString)
+}
+
+// NewVersionedTLSClientFromBytes returns a Client instance ready for TLS communications with the givens
+// server endpoint, key and certificates (passed inline to the function as opposed to being
+// read from a local file), using a specific remote API version.
+func NewVersionedTLSClientFromBytes(endpoint string, certPEMBlock, keyPEMBlock, caPEMCert []byte, apiVersionString string) (*Client, error) {
 	u, err := parseEndpoint(endpoint, true)
 	if err != nil {
 		return nil, err
@@ -195,23 +226,19 @@ func NewVersionedTLSClient(endpoint string, cert, key, ca, apiVersionString stri
 			return nil, err
 		}
 	}
-	if cert == "" || key == "" {
-		return nil, errors.New("Both cert and key path are required")
+	if certPEMBlock == nil || keyPEMBlock == nil {
+		return nil, errors.New("Both cert and key are required")
 	}
-	tlsCert, err := tls.LoadX509KeyPair(cert, key)
+	tlsCert, err := tls.X509KeyPair(certPEMBlock, keyPEMBlock)
 	if err != nil {
 		return nil, err
 	}
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{tlsCert}}
-	if ca == "" {
+	if caPEMCert == nil {
 		tlsConfig.InsecureSkipVerify = true
 	} else {
-		cert, err := ioutil.ReadFile(ca)
-		if err != nil {
-			return nil, err
-		}
 		caPool := x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM(cert) {
+		if !caPool.AppendCertsFromPEM(caPEMCert) {
 			return nil, errors.New("Could not add RootCA pem")
 		}
 		tlsConfig.RootCAs = caPool
@@ -272,13 +299,15 @@ func (c *Client) getServerAPIVersionString() (version string, err error) {
 	if status != http.StatusOK {
 		return "", fmt.Errorf("Received unexpected status %d while trying to retrieve the server version", status)
 	}
-	var versionResponse map[string]string
+	var versionResponse map[string]interface{}
 	err = json.Unmarshal(body, &versionResponse)
 	if err != nil {
 		return "", err
 	}
-	version = versionResponse["ApiVersion"]
-	return version, nil
+	if version, ok := (versionResponse["ApiVersion"]).(string); ok {
+		return version, nil
+	}
+	return "", nil
 }
 
 type doOptions struct {
@@ -653,28 +682,10 @@ func parseEndpoint(endpoint string, tls bool) (*url.URL, error) {
 	if tls {
 		u.Scheme = "https"
 	}
-	if u.Scheme == "tcp" {
-		_, port, err := net.SplitHostPort(u.Host)
-		if err != nil {
-			if e, ok := err.(*net.AddrError); ok {
-				if e.Err == "missing port in address" {
-					return u, nil
-				}
-			}
-			return nil, ErrInvalidEndpoint
-		}
-
-		number, err := strconv.ParseInt(port, 10, 64)
-		if err == nil && number == 2376 {
-			u.Scheme = "https"
-		} else {
-			u.Scheme = "http"
-		}
-	}
-	if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "unix" {
-		return nil, ErrInvalidEndpoint
-	}
-	if u.Scheme != "unix" {
+	switch u.Scheme {
+	case "unix":
+		return u, nil
+	case "http", "https", "tcp":
 		_, port, err := net.SplitHostPort(u.Host)
 		if err != nil {
 			if e, ok := err.(*net.AddrError); ok {
@@ -686,10 +697,17 @@ func parseEndpoint(endpoint string, tls bool) (*url.URL, error) {
 		}
 		number, err := strconv.ParseInt(port, 10, 64)
 		if err == nil && number > 0 && number < 65536 {
+			if u.Scheme == "tcp" {
+				if number == 2376 {
+					u.Scheme = "https"
+				} else {
+					u.Scheme = "http"
+				}
+			}
 			return u, nil
 		}
-	} else {
-		return u, nil // we don't need port when using a unix socket
+		return nil, ErrInvalidEndpoint
+	default:
+		return nil, ErrInvalidEndpoint
 	}
-	return nil, ErrInvalidEndpoint
 }
